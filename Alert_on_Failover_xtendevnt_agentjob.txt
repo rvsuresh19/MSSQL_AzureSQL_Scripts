@@ -1,0 +1,216 @@
+-- Step1: Create a log table to dedupe alerts and for audit
+USE [DBMaintenance]
+GO
+
+/****** Object:  Table [dbo].[AG_Failover_Log]    Script Date: 12/10/2025 1:28:30 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[AG_Failover_Log](
+  [id] [int] IDENTITY(1,1) NOT NULL,
+  [event_timestamp] [datetime2](3) NOT NULL,
+  [previous_state] [varchar](255) NULL,
+  [current_state] [varchar](255) NOT NULL,
+  [availability_replica_name] [varchar](255) NULL,
+  [availability_group_name] [varchar](255) NULL,
+  [alerted_at] [datetime2](3) NULL,
+  [alert_message] [nvarchar](4000) NULL,
+PRIMARY KEY CLUSTERED 
+(
+  [id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+USE [DBMaintenance]
+GO
+
+SET ANSI_PADDING ON
+GO
+
+/****** Object:  Index [UX_AG_Failover_Log_Unique]    Script Date: 12/10/2025 1:28:43 PM ******/
+CREATE UNIQUE NONCLUSTERED INDEX [UX_AG_Failover_Log_Unique] ON [dbo].[AG_Failover_Log]
+(
+  [event_timestamp] ASC,
+  [availability_group_name] ASC,
+  [availability_replica_name] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, SORT_IN_TEMPDB = OFF, IGNORE_DUP_KEY = OFF, DROP_EXISTING = OFF, ONLINE = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+GO
+
+--Step 2: Create an agent job to send one alert when a server change to Primary.
+USE [msdb]
+GO
+
+/****** Object:  Job [AG Failover Alert]    Script Date: 12/10/2025 1:28:59 PM ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]    Script Date: 12/10/2025 1:28:59 PM ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'AG Failover Alert', 
+    @enabled=1, 
+    @notify_level_eventlog=2, 
+    @notify_level_email=0, 
+    @notify_level_netsend=0, 
+    @notify_level_page=0, 
+    @delete_level=0, 
+    @description=N'Sends an email alert when an Always On AG failover promotes a replica to PRIMARY (via AlwaysOn_health XEvent).', 
+    @category_name=N'[Uncategorized (Local)]', 
+    @owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Detect failover and send alert]    Script Date: 12/10/2025 1:28:59 PM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Detect failover and send alert', 
+    @step_id=1, 
+    @cmdexec_success_code=0, 
+    @on_success_action=1, 
+    @on_success_step_id=0, 
+    @on_fail_action=2, 
+    @on_fail_step_id=0, 
+    @retry_attempts=0, 
+    @retry_interval=0, 
+    @os_run_priority=0, @subsystem=N'TSQL', 
+    @command=N'
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_PADDING ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+
+DECLARE @FileName NVARCHAR(4000);
+
+-- Your original query to locate the XE file for AlwaysOn_health
+SELECT @FileName = target_data.value(''(EventFileTarget/File/@name)[1]'',''nvarchar(4000)'')
+FROM (
+    SELECT CAST(t.target_data AS XML) AS target_data
+    FROM sys.dm_xe_sessions s
+    JOIN sys.dm_xe_session_targets t
+      ON s.address = t.event_session_address
+    WHERE s.name = N''AlwaysOn_health''
+) AS ft;
+
+IF @FileName IS NULL
+BEGIN
+    RAISERROR(''AlwaysOn_health XEvent file not found. Is the session enabled?'', 16, 1);
+    RETURN;
+END
+
+;WITH XE AS
+(
+    SELECT
+        CAST(event_data AS XML) AS XEData
+    FROM sys.fn_xe_file_target_read_file(@FileName, NULL, NULL, NULL)
+    WHERE object_name = ''availability_replica_state_change''
+)
+SELECT TOP (1)
+       XEData.value(''(event/@timestamp)[1]'',''datetime2(3)'') AS event_timestamp,
+       XEData.value(''(event/data[@name="previous_state"]/text)[1]'',''varchar(255)'') AS previous_state,
+       XEData.value(''(event/data[@name="current_state"]/text)[1]'',''varchar(255)'') AS current_state,
+       XEData.value(''(event/data[@name="availability_replica_name"]/value)[1]'',''varchar(255)'') AS availability_replica_name,
+       XEData.value(''(event/data[@name="availability_group_name"]/value)[1]'',''varchar(255)'') AS availability_group_name
+INTO #LatestPrimary
+FROM XE
+WHERE XEData.value(''(event/data[@name="current_state"]/text)[1]'',''varchar(255)'') = ''PRIMARY_NORMAL''
+ORDER BY event_timestamp DESC;
+
+IF NOT EXISTS (SELECT 1 FROM #LatestPrimary)
+    RETURN; -- nothing to do
+
+DECLARE
+    @event_timestamp               DATETIME2(3),
+    @previous_state                VARCHAR(255),
+    @current_state                 VARCHAR(255),
+    @availability_replica_name     VARCHAR(255),
+    @availability_group_name       VARCHAR(255),
+    @msg NVARCHAR(4000);
+
+SELECT
+    @event_timestamp            = event_timestamp,
+    @previous_state             = previous_state,
+    @current_state              = current_state,
+    @availability_replica_name  = availability_replica_name,
+    @availability_group_name    = availability_group_name
+FROM #LatestPrimary;
+
+-- Dedupe: only alert if we have NOT logged this event yet
+IF NOT EXISTS (
+    SELECT 1
+    FROM DBMaintenance.dbo.AG_Failover_Log WITH (READCOMMITTED)
+    WHERE event_timestamp = @event_timestamp
+      AND availability_group_name = @availability_group_name
+      AND availability_replica_name = @availability_replica_name
+)
+BEGIN
+    SET @msg = CONCAT(
+        N''Always On Failover detected.'', CHAR(13), CHAR(10),
+        N''AG: '', @availability_group_name, CHAR(13), CHAR(10),
+        N''Replica: '', @availability_replica_name, CHAR(13), CHAR(10),
+        N''Previous state: '', COALESCE(@previous_state, ''<unknown>''), CHAR(13), CHAR(10),
+        N''Current state: '', @current_state, CHAR(13), CHAR(10),
+        N''Event timestamp (UTC): '', CONVERT(NVARCHAR(50), @event_timestamp, 126)
+    );
+
+    -- Log it
+    INSERT INTO DBMaintenance.dbo.AG_Failover_Log
+    (
+        event_timestamp, previous_state, current_state,
+        availability_replica_name, availability_group_name,
+        alerted_at, alert_message
+    )
+    VALUES
+    (
+        @event_timestamp, @previous_state, @current_state,
+        @availability_replica_name, @availability_group_name,
+        SYSUTCDATETIME(), @msg
+    );
+
+
+EXEC msdb.dbo.sp_notify_operator
+    @profile_name    = N''HaCT_DBMail_Profile'',
+    @name    = N''SQLDBAGroup'',
+    @subject = N''ALERT: Always On AG Failover to PRIMARY'',
+    @body    = @msg;
+
+
+END
+', 
+    @database_name=N'master', 
+    @flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'1min', 
+    @enabled=1, 
+    @freq_type=4, 
+    @freq_interval=1, 
+    @freq_subday_type=4, 
+    @freq_subday_interval=1, 
+    @freq_relative_interval=0, 
+    @freq_recurrence_factor=0, 
+    @active_start_date=20251209, 
+    @active_end_date=99991231, 
+    @active_start_time=0, 
+    @active_end_time=235959, 
+    @schedule_uid=N'e85d998c-4f9e-4182-9ee4-84cb6f6ca454'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+GO
+
+
+ 
