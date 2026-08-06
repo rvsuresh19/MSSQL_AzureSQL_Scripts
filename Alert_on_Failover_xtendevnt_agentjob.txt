@@ -1,4 +1,4 @@
--- Step1: Create a log table to dedupe alerts and for audit
+-- Step1: Create a log table to dedupe alerts and for audit ss
 USE [DBMaintenance]
 GO
 
