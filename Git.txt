@@ -1,0 +1,61 @@
+cd to Directory
+git config --global user.name 'surseh'
+git config --global user.email 'suresh@gmail.com'
+git config --global init.defaultBranch main
+git init (one off)
+
+
+
+ --make changes to files  or create files (created index.html, abc.js files)
+git status
+git add readme.html
+git commit -m "Readme file"
+git log  ==> to check history of what happened
+git add . ==> to add all files
+git commit -m "added all files"
+
+
+git checkout commitcodefromgitlog  ==> to switch to old commit
+git checkout main  ==> switch back to main
+
+git checkout -f main ==> Switch back to main and remove all changes revert to main branch current changes will go away
+
+Create a repo in git hub
+git remote add origin https://github.com/demo/code.git  => connect remote repository to local repository
+git push -u origin main  => to push local repo to remote repo
+
+Create a branch
+-------------------
+git branch feature  => create a branch feature (this will create files from main branch)
+
+git checkout feature ==> to switch to feature branch (or git checkout -b feature1 to create a branch and checkout in a single command)
+
+git branch newfeature feature  ==>(this will create a new branch newfeature from copy of feature)
+
+
+Push he new branch to origin (github)
+-----------------------------
+git push --set-upstream origin feature  (or) git push -u origin feature (for first time only after that just "git push" alone is enough)
+
+After the go to git hub and click on compare and pullrequest and then perform merge. instead of doing git merge command
+
+Go back to main branch 
+---------------------
+git pull  => to get it to local
+
+------------------------------------------------------
+
+To fetch all branches from remote to local
+---------------------------------
+git fetch
+
+
+
+
+git add .
+git commit -m "dkkd"
+git push
+compare and pull request (UI)
+merge pull request(UI)
+git checkout main
+git pull
