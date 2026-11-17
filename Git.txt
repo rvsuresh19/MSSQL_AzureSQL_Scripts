@@ -50,8 +50,6 @@ To fetch all branches from remote to local
 git fetch
 
 
-
-
 git add .
 git commit -m "dkkd"
 git push
@@ -59,3 +57,15 @@ compare and pull request (UI)
 merge pull request(UI)
 git checkout main
 git pull
+
+To delete remote branch
+-------
+git push origin --delete branchname
+
+To delete local branch
+--------
+git branch -d  branchname
+
+Best practice - Update remote reference and remove stale ones
+------------
+git fetch --prune
